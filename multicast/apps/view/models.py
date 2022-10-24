@@ -1,7 +1,9 @@
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import User
 from django.db import models, transaction
 from django.db.models import F
+from django.db.transaction import get_connection
 from django.utils import timezone
 
 from multicast.settings import TRENDING_STREAM_USAGE_WEIGHT, TRENDING_STREAM_MAX_SIZE, TRENDING_STREAM_INIT_SCORE
@@ -162,29 +164,37 @@ class TrendingStreamManager(models.Manager):
         :param stream: Stream to be added to the trending stream table
         :return: None
         """
-        # Get all trending streams from the table
-        trending_streams = TrendingStream.objects.all()
         # Start an atomic transaction
         with transaction.atomic():
-            # Update the score of all existing trending streams
-            trending_streams.update(score=F("score") * TRENDING_STREAM_USAGE_WEIGHT)
-            # Search for the input stream in the trending table
-            found = trending_streams.filter(stream_id=stream.id).first()
-            if found is None:
-                # The stream was not found in the trending table
-                if trending_streams.count() < TRENDING_STREAM_MAX_SIZE:
-                    # We have room -> Add the stream to the trending table
-                    TrendingStream.objects.create(stream=stream, score=TRENDING_STREAM_INIT_SCORE)
+            # Lock the whole table for the transaction, so that other transactions cannot get executed simultaneously
+            # Make sure not to lock, when sqlite is used, because it does not support locking!!!
+            cursor = get_connection().cursor()
+            if settings.DATABASES['default']['ENGINE'] != 'django.db.backends.sqlite3':
+                cursor.execute(f'LOCK TABLE {self.model._meta.db_table}')
+            try:
+                # Get all trending streams from the table
+                trending_streams = TrendingStream.objects.all()
+                # Update the score of all existing trending streams
+                trending_streams.update(score=F("score") * TRENDING_STREAM_USAGE_WEIGHT)
+                # Search for the input stream in the trending table
+                found = trending_streams.filter(stream_id=stream.id).first()
+                if found is None:
+                    # The stream was not found in the trending table
+                    if trending_streams.count() < TRENDING_STREAM_MAX_SIZE:
+                        # We have room -> Add the stream to the trending table
+                        TrendingStream.objects.create(stream=stream, score=TRENDING_STREAM_INIT_SCORE)
+                    else:
+                        # No more room -> Delete the last trending stream and add the input stream to the trending table
+                        last_trending_stream = trending_streams.last()
+                        if last_trending_stream:
+                            last_trending_stream.delete()
+                        TrendingStream.objects.create(stream=stream, score=TRENDING_STREAM_INIT_SCORE)
                 else:
-                    # No more room -> Delete the last trending stream and add the input stream to the trending table
-                    last_trending_stream = trending_streams.last()
-                    if last_trending_stream:
-                        last_trending_stream.delete()
-                    TrendingStream.objects.create(stream=stream, score=TRENDING_STREAM_INIT_SCORE)
-            else:
-                # If the input stream already exists in the trending table -> Increment its score
-                found.score = found.score + TRENDING_STREAM_INIT_SCORE
-                found.save()
+                    # If the input stream already exists in the trending table -> Increment its score
+                    found.score = found.score + TRENDING_STREAM_INIT_SCORE
+                    found.save()
+            finally:
+                cursor.close()
 
 
 class TrendingStream(models.Model):
