@@ -193,6 +193,12 @@ class TrendingStreamManager(models.Manager):
                     # If the input stream already exists in the trending table -> Increment its score
                     found.score = found.score + TRENDING_STREAM_INIT_SCORE
                     found.save()
+
+                # Get the trending streams, calculate the new rankings and update the table at once
+                trending_streams = TrendingStream.objects.all()
+                for index, trending_stream in enumerate(trending_streams):
+                    trending_stream.ranking = index + 1
+                TrendingStream.objects.bulk_update(trending_streams, ['ranking'])
             finally:
                 cursor.close()
 
@@ -200,6 +206,7 @@ class TrendingStreamManager(models.Manager):
 class TrendingStream(models.Model):
     stream = models.OneToOneField(Stream, on_delete=models.CASCADE, related_name="trending_stream")
     score = models.FloatField()
+    ranking = models.IntegerField(default=101)
 
     objects = TrendingStreamManager()
 
@@ -208,16 +215,3 @@ class TrendingStream(models.Model):
 
     def __str__(self):
         return "{:.3f}: {}".format(self.score, self.stream.get_description())
-
-    def ranking(self):
-        """
-        Returns the rank of the trending stream. The rank is computed dynamically!
-
-        References:
-        How do I get the position of a result in the list after an order_by?,
-        https://stackoverflow.com/questions/2659245/how-do-i-get-the-position-of-a-result-in-the-list-after-an-order-by/51317266#51317266
-
-        :return: Rank of the trending stream.
-        """
-        count = TrendingStream.objects.filter(score__gt=self.score).count()
-        return count + 1
